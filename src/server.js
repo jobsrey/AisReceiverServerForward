@@ -58,6 +58,7 @@ class PortChannel {
     if (this.lastData) {
       try {
         socket.write(this.lastData);
+        socket.uncork && socket.uncork(); // Force flush
       } catch (e) {}
     }
   }
@@ -84,15 +85,27 @@ class PortChannel {
       console.log(`[Port ${this.port}] 📨 Data: ${preview}... -> ${this.receivers.size} receivers`);
     }
 
-    // Forward to all receivers
+    // Forward to all receivers immediately
+    const deadReceivers = [];
     for (const receiver of this.receivers) {
       try {
-        receiver.write(data);
-        this.bytesSent += data.length;
+        // Check if socket is still writable
+        if (receiver.writable && !receiver.destroyed) {
+          receiver.write(data);
+          this.bytesSent += data.length;
+        } else {
+          deadReceivers.push(receiver);
+        }
       } catch (e) {
         console.log(`[Port ${this.port}] ❌ Error sending to receiver: ${e.message}`);
-        this.removeReceiver(receiver);
+        deadReceivers.push(receiver);
       }
+    }
+    
+    // Clean up dead receivers
+    for (const dead of deadReceivers) {
+      this.removeReceiver(dead);
+      try { dead.destroy(); } catch (e) {}
     }
   }
 
@@ -136,6 +149,8 @@ class AISReceiverServer {
     let isSender = false;
     let isIdentified = false;
 
+    // Disable Nagle's algorithm for real-time data
+    socket.setNoDelay(true);
     socket.setKeepAlive(true, 30000);
     socket.setTimeout(300000); // 5 minutes timeout
 
@@ -193,14 +208,14 @@ class AISReceiverServer {
     // Initially, add as receiver (most common case)
     // Role will be determined on first data
     if (!isIdentified) {
-      // Wait a moment to see if they send data
+      // Wait a short moment to see if they send data (reduced from 1000ms to 100ms)
       setTimeout(() => {
-        if (!isIdentified) {
+        if (!isIdentified && !socket.destroyed) {
           isIdentified = true;
           isSender = false;
           channel.addReceiver(socket);
         }
-      }, 1000);
+      }, 100);
     }
   }
 
