@@ -1,0 +1,21 @@
+{
+  "name": "ais-receiver-server",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node src/test-client.js"
+  },
+  "keywords": [],
+  "dependencies": {
+    "dotenv": "^16.6.1"
+  },
+  "author": "WiWIT Project",
+  "license": "ISC",
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

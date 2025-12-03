@@ -1,0 +1,87 @@
+# ============================================
+# AIS RECEIVER SERVER - DOCKER COMPOSE
+# ============================================
+# 
+# IMPORTANT: Untuk multi-port range, gunakan network_mode: host
+# atau mapping port spesifik
+#
+# ============================================
+
+version: '3.8'
+
+services:
+  ais-receiver:
+    build: .
+    container_name: ais-receiver-server
+    restart: unless-stopped
+    
+    # ============================================
+    # OPTION 1: Host Network Mode (RECOMMENDED)
+    # ============================================
+    # Menggunakan network host untuk akses semua port
+    # Tidak perlu mapping port individual
+    network_mode: host
+    
+    # ============================================
+    # OPTION 2: Port Mapping (untuk port spesifik)
+    # ============================================
+    # Uncomment jika tidak menggunakan host network
+    # dan comment network_mode: host di atas
+    #
+    # ports:
+    #   # Port range untuk AIS
+    #   - "5300-5400:5300-5400"    # 100 ports
+    #   - "7000-7100:7000-7100"    # 100 ports
+    #   - "10000-10100:10000-10100" # 100 ports
+    
+    environment:
+      - HOST=0.0.0.0
+      - PORT_START=5300
+      - PORT_END=12000
+      - VERBOSE_LOGGING=false
+      - STATS_INTERVAL=60
+      - TZ=Asia/Jakarta
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('net').connect(7000, 'localhost', () => process.exit(0)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+# ============================================
+# USAGE EXAMPLES:
+# ============================================
+#
+# Start:
+#   docker-compose up -d
+#
+# View logs:
+#   docker-compose logs -f
+#
+# Stop:
+#   docker-compose down
+#
+# Rebuild:
+#   docker-compose build --no-cache
+#   docker-compose up -d
+#
+# ============================================

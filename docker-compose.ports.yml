@@ -1,0 +1,67 @@
+# ============================================
+# AIS RECEIVER SERVER - DOCKER COMPOSE
+# Version dengan Port Mapping Spesifik
+# ============================================
+# 
+# Gunakan file ini jika tidak bisa menggunakan host network
+# 
+# Usage: docker-compose -f docker-compose.ports.yml up -d
+#
+# ============================================
+
+version: '3.8'
+
+services:
+  ais-receiver:
+    build: .
+    container_name: ais-receiver-server
+    restart: unless-stopped
+    
+    # Port mapping untuk range tertentu
+    # Docker Compose mendukung port range
+    ports:
+      # Common AIS ports
+      - "5300-5350:5300-5350"   # 50 ports
+      - "6000-6050:6000-6050"   # 50 ports
+      - "7000-7050:7000-7050"   # 50 ports
+      - "8000-8050:8000-8050"   # 50 ports
+      - "9000-9050:9000-9050"   # 50 ports
+      - "10000-10050:10000-10050" # 50 ports
+      - "10110:10110"           # Standard NMEA port
+      - "11000-11050:11000-11050" # 50 ports
+      - "12000:12000"           # End range
+    
+    environment:
+      - HOST=0.0.0.0
+      - PORT_START=5300
+      - PORT_END=12000
+      - VERBOSE_LOGGING=false
+      - STATS_INTERVAL=60
+      - TZ=Asia/Jakarta
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ============================================
+# CATATAN:
+# ============================================
+# 
+# Docker Compose mendukung port range, tapi terbatas.
+# Jika perlu SEMUA port dari 5300-12000 (6700+ ports),
+# gunakan docker-compose.yml dengan network_mode: host
+#
+# ============================================

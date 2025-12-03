@@ -1,0 +1,96 @@
+# ============================================
+# AIS RECEIVER SERVER - COOLIFY PRODUCTION
+# ============================================
+# 
+# File ini dioptimasi untuk deployment via Coolify
+# 
+# Di Coolify:
+# 1. Create new Docker Compose service
+# 2. Point to this file: docker-compose.coolify.yml
+# 3. Enable "Use Host Network" di Network settings
+# 4. Set environment variables
+#
+# ============================================
+
+version: '3.8'
+
+services:
+  ais-receiver:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ais-receiver-server
+    restart: unless-stopped
+    
+    # ============================================
+    # HOST NETWORK - REQUIRED untuk multi-port
+    # ============================================
+    # Di Coolify, pastikan "Use Host Network" diaktifkan
+    network_mode: host
+    
+    # ============================================
+    # ENVIRONMENT VARIABLES
+    # ============================================
+    # Override via Coolify dashboard
+    environment:
+      - HOST=${HOST:-0.0.0.0}
+      - PORT_START=${PORT_START:-5300}
+      - PORT_END=${PORT_END:-12000}
+      - VERBOSE_LOGGING=${VERBOSE_LOGGING:-false}
+      - STATS_INTERVAL=${STATS_INTERVAL:-60}
+      - TZ=${TZ:-Asia/Jakarta}
+    
+    # ============================================
+    # RESOURCE LIMITS
+    # ============================================
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+      restart_policy:
+        condition: unless-stopped
+        delay: 5s
+        max_attempts: 3
+    
+    # ============================================
+    # LOGGING
+    # ============================================
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    
+    # ============================================
+    # LABELS untuk Coolify
+    # ============================================
+    labels:
+      - "coolify.managed=true"
+      - "coolify.type=tcp-service"
+      - "coolify.name=ais-receiver"
+
+# ============================================
+# COOLIFY DEPLOYMENT NOTES:
+# ============================================
+#
+# 1. NETWORK MODE:
+#    - Harus menggunakan host network untuk akses semua port
+#    - Di Coolify: Settings → Network → Enable "Use Host Network"
+#
+# 2. FIREWALL:
+#    - Pastikan port range terbuka di server
+#    - UFW: sudo ufw allow 5300:12000/tcp
+#
+# 3. ENVIRONMENT:
+#    - Set via Coolify dashboard
+#    - PORT_START dan PORT_END sesuaikan kebutuhan
+#
+# 4. MONITORING:
+#    - Logs: Coolify Logs tab
+#    - Stats: Lihat output server setiap STATS_INTERVAL detik
+#
+# ============================================
