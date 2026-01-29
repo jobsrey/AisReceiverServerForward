@@ -11,16 +11,37 @@
  */
 
 import net from 'net';
+import http from 'http';
 import dotenv from 'dotenv';
+import pino from 'pino';
 
 dotenv.config();
 
 // ============================================
+// LOGGER SETUP
+// ============================================
+const logger = pino({
+  level: process.env.LOG_LEVEL || 'info',
+  transport: process.env.NODE_ENV !== 'production' ? {
+    target: 'pino-pretty',
+    options: {
+      colorize: true,
+      translateTime: 'SYS:standard',
+      ignore: 'pid,hostname'
+    }
+  } : undefined,
+  formatters: {
+    level: (label) => ({ level: label })
+  }
+});
+
+// ============================================
 // CONFIGURATION
 // ============================================
-const PORT_START = parseInt(process.env.PORT_START) || 5300;
-const PORT_END = parseInt(process.env.PORT_END) || 12000;
+const PORT_START = parseInt(process.env.PORT_START) || 4000;
+const PORT_END = parseInt(process.env.PORT_END) || 5000;
 const HOST = process.env.HOST || '0.0.0.0';
+const HEALTH_PORT = parseInt(process.env.HEALTH_PORT) || 3000;
 const VERBOSE_LOGGING = process.env.VERBOSE_LOGGING === 'true';
 const STATS_INTERVAL = parseInt(process.env.STATS_INTERVAL) || 60;
 
@@ -41,18 +62,18 @@ class PortChannel {
 
   setSender(socket) {
     if (this.sender && this.sender !== socket) {
-      console.log(`[Port ${this.port}] ⚠️  Replacing existing sender`);
+      logger.warn({ port: this.port }, 'Replacing existing sender');
       try {
         this.sender.destroy();
       } catch (e) {}
     }
     this.sender = socket;
-    console.log(`[Port ${this.port}] 📡 AIS Sender connected: ${socket.remoteAddress}:${socket.remotePort}`);
+    logger.info({ port: this.port, remoteAddress: socket.remoteAddress, remotePort: socket.remotePort }, 'AIS Sender connected');
   }
 
   addReceiver(socket) {
     this.receivers.add(socket);
-    console.log(`[Port ${this.port}] 👁️  Receiver connected: ${socket.remoteAddress}:${socket.remotePort} (Total: ${this.receivers.size})`);
+    logger.info({ port: this.port, remoteAddress: socket.remoteAddress, remotePort: socket.remotePort, totalReceivers: this.receivers.size }, 'Receiver connected');
     
     // Send last data to new receiver if available
     if (this.lastData) {
@@ -65,12 +86,12 @@ class PortChannel {
 
   removeReceiver(socket) {
     this.receivers.delete(socket);
-    console.log(`[Port ${this.port}] 👋 Receiver disconnected (Remaining: ${this.receivers.size})`);
+    logger.info({ port: this.port, remainingReceivers: this.receivers.size }, 'Receiver disconnected');
   }
 
   removeSender() {
     this.sender = null;
-    console.log(`[Port ${this.port}] 📡 AIS Sender disconnected`);
+    logger.info({ port: this.port }, 'AIS Sender disconnected');
   }
 
   // Forward data from sender to all receivers
@@ -82,7 +103,7 @@ class PortChannel {
 
     if (VERBOSE_LOGGING) {
       const preview = data.toString().trim().substring(0, 80);
-      console.log(`[Port ${this.port}] 📨 Data: ${preview}... -> ${this.receivers.size} receivers`);
+      logger.debug({ port: this.port, preview, receivers: this.receivers.size }, 'Data forwarded');
     }
 
     // Forward to all receivers immediately
@@ -97,7 +118,7 @@ class PortChannel {
           deadReceivers.push(receiver);
         }
       } catch (e) {
-        console.log(`[Port ${this.port}] ❌ Error sending to receiver: ${e.message}`);
+        logger.error({ port: this.port, error: e.message }, 'Error sending to receiver');
         deadReceivers.push(receiver);
       }
     }
@@ -129,7 +150,9 @@ class AISReceiverServer {
   constructor() {
     this.channels = new Map();  // port -> PortChannel
     this.servers = new Map();   // port -> TCP Server
+    this.healthServer = null;   // HTTP server for health check
     this.startTime = Date.now();
+    this.isHealthy = true;
   }
 
   getOrCreateChannel(port) {
@@ -196,12 +219,12 @@ class AISReceiverServer {
 
     socket.on('error', (err) => {
       if (VERBOSE_LOGGING) {
-        console.log(`[Port ${port}] ❌ Socket error (${clientInfo}): ${err.message}`);
+        logger.warn({ port, clientInfo, error: err.message }, 'Socket error');
       }
     });
 
     socket.on('timeout', () => {
-      console.log(`[Port ${port}] ⏰ Socket timeout: ${clientInfo}`);
+      logger.info({ port, clientInfo }, 'Socket timeout');
       socket.destroy();
     });
 
@@ -228,10 +251,10 @@ class AISReceiverServer {
 
       server.on('error', (err) => {
         if (err.code === 'EADDRINUSE') {
-          console.log(`[Port ${port}] ⚠️  Port already in use, skipping`);
+          logger.warn({ port }, 'Port already in use, skipping');
           resolve(false);
         } else {
-          console.error(`[Port ${port}] ❌ Server error: ${err.message}`);
+          logger.error({ port, error: err.message }, 'Server error');
           reject(err);
         }
       });
@@ -243,17 +266,91 @@ class AISReceiverServer {
     });
   }
 
+  // Start HTTP health check server
+  startHealthServer() {
+    return new Promise((resolve, reject) => {
+      this.healthServer = http.createServer((req, res) => {
+        const stats = this.getHealthStats();
+        
+        if (req.url === '/health' || req.url === '/healthz') {
+          if (this.isHealthy) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ status: 'healthy', ...stats }));
+          } else {
+            res.writeHead(503, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ status: 'unhealthy', ...stats }));
+          }
+        } else if (req.url === '/ready') {
+          if (this.servers.size > 0) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ status: 'ready', activePorts: this.servers.size }));
+          } else {
+            res.writeHead(503, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ status: 'not_ready' }));
+          }
+        } else if (req.url === '/metrics' || req.url === '/stats') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(stats, null, 2));
+        } else {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Not found', endpoints: ['/health', '/ready', '/metrics'] }));
+        }
+      });
+
+      this.healthServer.on('error', (err) => {
+        logger.error({ port: HEALTH_PORT, error: err.message }, 'Health server error');
+        reject(err);
+      });
+
+      this.healthServer.listen(HEALTH_PORT, HOST, () => {
+        logger.info({ port: HEALTH_PORT, host: HOST }, 'Health check server started');
+        resolve(true);
+      });
+    });
+  }
+
+  getHealthStats() {
+    const uptime = Math.floor((Date.now() - this.startTime) / 1000);
+    const activeChannels = Array.from(this.channels.values())
+      .filter(ch => ch.sender || ch.receivers.size > 0);
+    
+    let totalMessages = 0;
+    let totalBytesReceived = 0;
+    let totalBytesSent = 0;
+    let totalSenders = 0;
+    let totalReceivers = 0;
+
+    for (const ch of this.channels.values()) {
+      totalMessages += ch.messageCount;
+      totalBytesReceived += ch.bytesReceived;
+      totalBytesSent += ch.bytesSent;
+      if (ch.sender) totalSenders++;
+      totalReceivers += ch.receivers.size;
+    }
+
+    return {
+      uptime,
+      uptimeHuman: `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${uptime % 60}s`,
+      activePorts: this.servers.size,
+      activeChannels: activeChannels.length,
+      totalSenders,
+      totalReceivers,
+      totalMessages,
+      totalBytesReceived,
+      totalBytesSent,
+      portRange: { start: PORT_START, end: PORT_END },
+      timestamp: new Date().toISOString()
+    };
+  }
+
   // Start all port servers in range
   async start() {
-    console.log('='.repeat(70));
-    console.log('🚢 AIS MULTI-PORT RECEIVER & FORWARDER SERVER');
-    console.log('='.repeat(70));
-    console.log(`Host          : ${HOST}`);
-    console.log(`Port Range    : ${PORT_START} - ${PORT_END}`);
-    console.log(`Total Ports   : ${PORT_END - PORT_START + 1}`);
-    console.log(`Verbose       : ${VERBOSE_LOGGING}`);
-    console.log('='.repeat(70));
-    console.log('\n📡 Starting port servers...\n');
+    logger.info({ host: HOST, portStart: PORT_START, portEnd: PORT_END, totalPorts: PORT_END - PORT_START + 1, healthPort: HEALTH_PORT }, 'AIS Multi-Port Receiver & Forwarder Server starting');
+    
+    // Start health check server first
+    await this.startHealthServer();
+    
+    logger.info('Starting port servers...');
 
     let successCount = 0;
     let failCount = 0;
@@ -276,55 +373,49 @@ class AISReceiverServer {
       
       // Progress update
       const progress = Math.round(((endPort - PORT_START + 1) / (PORT_END - PORT_START + 1)) * 100);
-      process.stdout.write(`\r🔄 Progress: ${progress}% (${successCount} active, ${failCount} failed)`);
+      logger.debug({ progress, successCount, failCount }, 'Port startup progress');
     }
 
-    console.log('\n');
-    console.log('='.repeat(70));
-    console.log(`✅ Server started successfully!`);
-    console.log(`   Active ports: ${successCount}`);
-    console.log(`   Failed ports: ${failCount}`);
-    console.log('='.repeat(70));
-    console.log('\n📋 Usage:');
-    console.log('   AIS Device → connect & send to any port in range');
-    console.log('   OpenCPN/Client → connect to same port to receive data');
-    console.log('   Each port is an independent AIS channel');
-    console.log('='.repeat(70));
-    console.log('\n⏳ Waiting for connections...\n');
+    logger.info({ activePorts: successCount, failedPorts: failCount }, 'Server started successfully');
+    logger.info({ healthEndpoints: [`http://${HOST}:${HEALTH_PORT}/health`, `http://${HOST}:${HEALTH_PORT}/ready`, `http://${HOST}:${HEALTH_PORT}/metrics`] }, 'Health check endpoints available');
+    logger.info('Waiting for connections...');
 
     // Start stats interval
     setInterval(() => this.showStats(), STATS_INTERVAL * 1000);
   }
 
   showStats() {
-    const uptime = Math.floor((Date.now() - this.startTime) / 1000);
+    const stats = this.getHealthStats();
     const activeChannels = Array.from(this.channels.values())
       .filter(ch => ch.sender || ch.receivers.size > 0);
 
     if (activeChannels.length === 0) return;
 
-    console.log('\n' + '='.repeat(70));
-    console.log('📊 STATISTICS');
-    console.log('='.repeat(70));
-    console.log(`Uptime: ${Math.floor(uptime / 60)}m ${uptime % 60}s`);
-    console.log(`Active Channels: ${activeChannels.length}`);
-    console.log('-'.repeat(70));
-    console.log('Port\t\tSender\tReceivers\tMessages\tLast Data');
-    console.log('-'.repeat(70));
+    const channelDetails = activeChannels.map(ch => {
+      const chStats = ch.getStats();
+      return {
+        port: chStats.port,
+        hasSender: chStats.hasSender,
+        receivers: chStats.receiverCount,
+        messages: chStats.messageCount,
+        lastData: chStats.lastDataTime ? new Date(chStats.lastDataTime).toISOString() : null
+      };
+    });
 
-    for (const ch of activeChannels) {
-      const stats = ch.getStats();
-      const lastTime = stats.lastDataTime 
-        ? new Date(stats.lastDataTime).toLocaleTimeString() 
-        : 'Never';
-      console.log(`${stats.port}\t\t${stats.hasSender ? '✓' : '-'}\t${stats.receiverCount}\t\t${stats.messageCount}\t\t${lastTime}`);
-    }
-    console.log('='.repeat(70) + '\n');
+    logger.info({ 
+      uptime: stats.uptimeHuman, 
+      activeChannels: stats.activeChannels,
+      totalSenders: stats.totalSenders,
+      totalReceivers: stats.totalReceivers,
+      totalMessages: stats.totalMessages,
+      channels: channelDetails
+    }, 'Statistics');
   }
 
   // Graceful shutdown
   shutdown() {
-    console.log('\n\n🛑 Shutting down...');
+    logger.info('Shutting down...');
+    this.isHealthy = false;
     
     for (const [port, server] of this.servers) {
       server.close();
@@ -339,8 +430,12 @@ class AISReceiverServer {
       }
     }
     
+    if (this.healthServer) {
+      this.healthServer.close();
+    }
+    
     this.showStats();
-    console.log('👋 Goodbye!\n');
+    logger.info('Goodbye!');
     process.exit(0);
   }
 }
@@ -354,6 +449,6 @@ process.on('SIGINT', () => server.shutdown());
 process.on('SIGTERM', () => server.shutdown());
 
 server.start().catch(err => {
-  console.error('❌ Failed to start server:', err);
+  logger.error({ error: err.message }, 'Failed to start server');
   process.exit(1);
 });

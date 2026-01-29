@@ -1,9 +1,9 @@
 # ============================================
-# AIS RECEIVER SERVER - DOCKER COMPOSE
+# AIS RECEIVER SERVER - DOCKER COMPOSE FOR COOLIFY
 # ============================================
 # 
-# IMPORTANT: Untuk multi-port range, gunakan network_mode: host
-# atau mapping port spesifik
+# IMPORTANT: Untuk multi-port range (4000-5000), gunakan network_mode: host
+# atau mapping port spesifik di Coolify
 #
 # ============================================
 
@@ -16,30 +16,31 @@ services:
     restart: unless-stopped
     
     # ============================================
-    # OPTION 1: Host Network Mode (RECOMMENDED)
+    # OPTION 1: Host Network Mode (RECOMMENDED untuk port range besar)
     # ============================================
-    # Menggunakan network host untuk akses semua port
+    # Menggunakan network host untuk akses semua port 4000-5000
     # Tidak perlu mapping port individual
     network_mode: host
     
     # ============================================
-    # OPTION 2: Port Mapping (untuk port spesifik)
+    # OPTION 2: Port Mapping (untuk Coolify dengan port spesifik)
     # ============================================
     # Uncomment jika tidak menggunakan host network
     # dan comment network_mode: host di atas
     #
     # ports:
-    #   # Port range untuk AIS
-    #   - "5300-5400:5300-5400"    # 100 ports
-    #   - "7000-7100:7000-7100"    # 100 ports
-    #   - "10000-10100:10000-10100" # 100 ports
+    #   - "3000:3000"              # Health check port
+    #   - "4000-5000:4000-5000"    # AIS port range (1001 ports)
     
     environment:
+      - NODE_ENV=production
       - HOST=0.0.0.0
-      - PORT_START=5300
-      - PORT_END=12000
+      - PORT_START=4000
+      - PORT_END=5000
+      - HEALTH_PORT=3000
       - VERBOSE_LOGGING=false
       - STATS_INTERVAL=60
+      - LOG_LEVEL=info
       - TZ=Asia/Jakarta
     
     # Resource limits
@@ -47,26 +48,42 @@ services:
       resources:
         limits:
           cpus: '2'
-          memory: 1G
+          memory: 2G
         reservations:
           cpus: '0.5'
-          memory: 256M
+          memory: 512M
     
-    # Logging
+    # Logging configuration
     logging:
       driver: "json-file"
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: "50m"
+        max-file: "5"
     
-    # Health check
+    # Health check using HTTP endpoint
     healthcheck:
-      test: ["CMD", "node", "-e", "require('net').connect(7000, 'localhost', () => process.exit(0)).on('error', () => process.exit(1))"]
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 30s
 
+# ============================================
+# COOLIFY CONFIGURATION TIPS:
+# ============================================
+#
+# 1. Di Coolify, pilih "Dockerfile" sebagai build type
+# 2. Set environment variables di Coolify dashboard
+# 3. Untuk port range besar, gunakan "Host Network" mode
+# 4. Health check otomatis dari Dockerfile akan digunakan
+#
+# Environment Variables yang bisa di-override di Coolify:
+#   - PORT_START: Port awal (default: 4000)
+#   - PORT_END: Port akhir (default: 5000)
+#   - HEALTH_PORT: Port untuk health check (default: 3000)
+#   - VERBOSE_LOGGING: true/false
+#   - LOG_LEVEL: debug/info/warn/error
+#
 # ============================================
 # USAGE EXAMPLES:
 # ============================================
@@ -83,5 +100,9 @@ services:
 # Rebuild:
 #   docker-compose build --no-cache
 #   docker-compose up -d
+#
+# Test health check:
+#   curl http://localhost:3000/health
+#   curl http://localhost:3000/metrics
 #
 # ============================================

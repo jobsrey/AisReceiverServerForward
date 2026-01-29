@@ -1,7 +1,7 @@
 # ============================================
-# AIS RECEIVER SERVER - DOCKERFILE
+# AIS RECEIVER SERVER - DOCKERFILE FOR COOLIFY
 # ============================================
-# Multi-stage build for smaller image size
+# Optimized for Coolify deployment with health checks
 
 FROM node:20-alpine AS builder
 
@@ -10,8 +10,8 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci --only=production
+# Install all dependencies (including devDependencies for pino-pretty)
+RUN npm ci
 
 # ============================================
 # PRODUCTION IMAGE
@@ -19,6 +19,9 @@ RUN npm ci --only=production
 FROM node:20-alpine
 
 WORKDIR /app
+
+# Install curl for health checks
+RUN apk add --no-cache curl tini
 
 # Create non-root user for security
 RUN addgroup -g 1001 -S nodejs && \
@@ -33,15 +36,46 @@ COPY --chown=aisserver:nodejs . .
 # Set user
 USER aisserver
 
-# Default environment variables
+# ============================================
+# ENVIRONMENT VARIABLES (Coolify can override)
+# ============================================
+ENV NODE_ENV=production
 ENV HOST=0.0.0.0
-ENV PORT_START=5300
-ENV PORT_END=12000
+ENV PORT_START=4000
+ENV PORT_END=5000
+ENV HEALTH_PORT=3000
 ENV VERBOSE_LOGGING=false
 ENV STATS_INTERVAL=60
+ENV LOG_LEVEL=info
 
-# Note: Port range is exposed dynamically
-# Docker must be run with --network host or specific port mappings
+# ============================================
+# EXPOSE PORTS
+# ============================================
+# Health check port (required for Coolify)
+EXPOSE 3000
 
-# Start the server
+# AIS TCP port range 4000-5000
+# Note: In Coolify, you need to configure port mappings manually
+# or use network_mode: host for the full range
+
+# ============================================
+# HEALTH CHECK (for Coolify/Docker)
+# ============================================
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:3000/health || exit 1
+
+# ============================================
+# LABELS (for Coolify)
+# ============================================
+LABEL org.opencontainers.image.title="AIS Receiver Server Forward"
+LABEL org.opencontainers.image.description="AIS Multi-Port TCP Receiver & Forwarder Server"
+LABEL org.opencontainers.image.vendor="WiWIT Project"
+LABEL coolify.healthcheck.path="/health"
+LABEL coolify.healthcheck.port="3000"
+
+# ============================================
+# START SERVER
+# ============================================
+# Use tini as init system for proper signal handling
+ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "src/server.js"]
