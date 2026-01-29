@@ -10,8 +10,8 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install all dependencies (including devDependencies for pino-pretty)
-RUN npm ci
+# Install all dependencies (using npm install for flexibility with lock file)
+RUN npm install --omit=dev
 
 # ============================================
 # PRODUCTION IMAGE
