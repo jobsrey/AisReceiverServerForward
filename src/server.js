@@ -44,6 +44,7 @@ const HOST = process.env.HOST || '0.0.0.0';
 const HEALTH_PORT = parseInt(process.env.HEALTH_PORT) || 3000;
 const VERBOSE_LOGGING = process.env.VERBOSE_LOGGING === 'true';
 const STATS_INTERVAL = parseInt(process.env.STATS_INTERVAL) || 60;
+const CONNECTION_REFRESH_INTERVAL = parseInt(process.env.CONNECTION_REFRESH_INTERVAL) || 30; // minutes, 0 = disabled
 
 // ============================================
 // PORT MANAGER - Manages all port channels
@@ -52,27 +53,68 @@ class PortChannel {
   constructor(port) {
     this.port = port;
     this.sender = null;           // The AIS device sending data
-    this.receivers = new Set();   // Clients receiving data (OpenCPN, etc.)
+    this.senderTimer = null;      // Timer for sender connection refresh
+    this.receivers = new Map();   // socket -> { timer } Clients receiving data (OpenCPN, etc.)
     this.lastData = null;         // Last received data (for new connections)
     this.lastDataTime = null;
     this.messageCount = 0;
     this.bytesReceived = 0;
     this.bytesSent = 0;
+    this.refreshCount = 0;        // Count of connection refreshes
   }
 
   setSender(socket) {
     if (this.sender && this.sender !== socket) {
       logger.warn({ port: this.port }, 'Replacing existing sender');
+      this.clearSenderTimer();
       try {
         this.sender.destroy();
       } catch (e) {}
     }
     this.sender = socket;
     logger.info({ port: this.port, remoteAddress: socket.remoteAddress, remotePort: socket.remotePort }, 'AIS Sender connected');
+    
+    // Setup connection refresh timer for sender
+    this.setupSenderRefreshTimer(socket);
+  }
+
+  setupSenderRefreshTimer(socket) {
+    if (CONNECTION_REFRESH_INTERVAL <= 0) return;
+    
+    this.clearSenderTimer();
+    const intervalMs = CONNECTION_REFRESH_INTERVAL * 60 * 1000;
+    
+    this.senderTimer = setTimeout(() => {
+      if (this.sender === socket && !socket.destroyed) {
+        this.refreshCount++;
+        logger.info({ port: this.port, remoteAddress: socket.remoteAddress, intervalMinutes: CONNECTION_REFRESH_INTERVAL, refreshCount: this.refreshCount }, 'Sender connection refresh - disconnecting');
+        socket.destroy();
+      }
+    }, intervalMs);
+  }
+
+  clearSenderTimer() {
+    if (this.senderTimer) {
+      clearTimeout(this.senderTimer);
+      this.senderTimer = null;
+    }
   }
 
   addReceiver(socket) {
-    this.receivers.add(socket);
+    // Setup connection refresh timer for receiver
+    let timer = null;
+    if (CONNECTION_REFRESH_INTERVAL > 0) {
+      const intervalMs = CONNECTION_REFRESH_INTERVAL * 60 * 1000;
+      timer = setTimeout(() => {
+        if (this.receivers.has(socket) && !socket.destroyed) {
+          this.refreshCount++;
+          logger.info({ port: this.port, remoteAddress: socket.remoteAddress, intervalMinutes: CONNECTION_REFRESH_INTERVAL, refreshCount: this.refreshCount }, 'Receiver connection refresh - disconnecting');
+          socket.destroy();
+        }
+      }, intervalMs);
+    }
+    
+    this.receivers.set(socket, { timer });
     logger.info({ port: this.port, remoteAddress: socket.remoteAddress, remotePort: socket.remotePort, totalReceivers: this.receivers.size }, 'Receiver connected');
     
     // Send last data to new receiver if available
@@ -85,11 +127,16 @@ class PortChannel {
   }
 
   removeReceiver(socket) {
+    const receiverData = this.receivers.get(socket);
+    if (receiverData && receiverData.timer) {
+      clearTimeout(receiverData.timer);
+    }
     this.receivers.delete(socket);
     logger.info({ port: this.port, remainingReceivers: this.receivers.size }, 'Receiver disconnected');
   }
 
   removeSender() {
+    this.clearSenderTimer();
     this.sender = null;
     logger.info({ port: this.port }, 'AIS Sender disconnected');
   }
@@ -108,7 +155,7 @@ class PortChannel {
 
     // Forward to all receivers immediately
     const deadReceivers = [];
-    for (const receiver of this.receivers) {
+    for (const [receiver, _] of this.receivers) {
       try {
         // Check if socket is still writable
         if (receiver.writable && !receiver.destroyed) {
@@ -138,7 +185,8 @@ class PortChannel {
       messageCount: this.messageCount,
       bytesReceived: this.bytesReceived,
       bytesSent: this.bytesSent,
-      lastDataTime: this.lastDataTime
+      lastDataTime: this.lastDataTime,
+      refreshCount: this.refreshCount
     };
   }
 }
