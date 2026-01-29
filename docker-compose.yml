@@ -43,16 +43,6 @@ services:
       - LOG_LEVEL=info
       - TZ=Asia/Jakarta
     
-    # Resource limits
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 2G
-        reservations:
-          cpus: '0.5'
-          memory: 512M
-    
     # Logging configuration
     logging:
       driver: "json-file"
