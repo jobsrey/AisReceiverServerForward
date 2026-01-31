@@ -39,7 +39,7 @@ const logger = pino({
 // CONFIGURATION
 // ============================================
 const PORT_START = parseInt(process.env.PORT_START) || 4000;
-const PORT_END = parseInt(process.env.PORT_END) || 5000;
+const PORT_END = parseInt(process.env.PORT_END) || 4100;
 const HOST = process.env.HOST || '0.0.0.0';
 const HEALTH_PORT = parseInt(process.env.HEALTH_PORT) || 3000;
 const VERBOSE_LOGGING = process.env.VERBOSE_LOGGING === 'true';
