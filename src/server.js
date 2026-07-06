@@ -1,19 +1,19 @@
 /**
  * AIS Multi-Port TCP Receiver & Forwarder Server
- * 
+ *
  * Flow:
  * 1. AIS Device connects to Server:PORT and sends data
  * 2. Clients (OpenCPN, etc.) connect to same Server:PORT
  * 3. Server forwards AIS data from sender to all connected receivers on-the-fly
- * 
+ *
  * Each port represents a different AIS stream/identity
  * Data is NOT stored - pure forwarding/streaming
  */
 
-import net from 'net';
-import http from 'http';
-import dotenv from 'dotenv';
-import pino from 'pino';
+import net from "net";
+import http from "http";
+import dotenv from "dotenv";
+import pino from "pino";
 
 dotenv.config();
 
@@ -21,30 +21,47 @@ dotenv.config();
 // LOGGER SETUP
 // ============================================
 const logger = pino({
-  level: process.env.LOG_LEVEL || 'info',
-  transport: process.env.NODE_ENV !== 'production' ? {
-    target: 'pino-pretty',
-    options: {
-      colorize: true,
-      translateTime: 'SYS:standard',
-      ignore: 'pid,hostname'
-    }
-  } : undefined,
+  level: process.env.LOG_LEVEL || "info",
+  transport:
+    process.env.NODE_ENV !== "production"
+      ? {
+          target: "pino-pretty",
+          options: {
+            colorize: true,
+            translateTime: "SYS:standard",
+            ignore: "pid,hostname",
+          },
+        }
+      : undefined,
   formatters: {
-    level: (label) => ({ level: label })
-  }
+    level: (label) => ({ level: label }),
+  },
 });
+
+// ============================================
+// AIS DATA DETECTOR
+// ============================================
+function isAISData(str) {
+  return (
+    str.includes("!AIVDM") ||
+    str.includes("!AIVDO") ||
+    str.includes("$GPGGA") ||
+    str.includes("$GPRMC") ||
+    str.startsWith("\\")
+  );
+}
 
 // ============================================
 // CONFIGURATION
 // ============================================
 const PORT_START = parseInt(process.env.PORT_START) || 4000;
 const PORT_END = parseInt(process.env.PORT_END) || 4100;
-const HOST = process.env.HOST || '0.0.0.0';
+const HOST = process.env.HOST || "0.0.0.0";
 const HEALTH_PORT = parseInt(process.env.HEALTH_PORT) || 3000;
-const VERBOSE_LOGGING = process.env.VERBOSE_LOGGING === 'true';
+const VERBOSE_LOGGING = process.env.VERBOSE_LOGGING === "true";
 const STATS_INTERVAL = parseInt(process.env.STATS_INTERVAL) || 60;
-const CONNECTION_REFRESH_INTERVAL = parseInt(process.env.CONNECTION_REFRESH_INTERVAL) || 30; // minutes, 0 = disabled
+const CONNECTION_REFRESH_INTERVAL =
+  parseInt(process.env.CONNECTION_REFRESH_INTERVAL) || 30; // minutes, 0 = disabled
 
 // ============================================
 // PORT MANAGER - Manages all port channels
@@ -52,42 +69,57 @@ const CONNECTION_REFRESH_INTERVAL = parseInt(process.env.CONNECTION_REFRESH_INTE
 class PortChannel {
   constructor(port) {
     this.port = port;
-    this.sender = null;           // The AIS device sending data
-    this.senderTimer = null;      // Timer for sender connection refresh
-    this.receivers = new Map();   // socket -> { timer } Clients receiving data (OpenCPN, etc.)
-    this.lastData = null;         // Last received data (for new connections)
+    this.sender = null; // The AIS device sending data
+    this.senderTimer = null; // Timer for sender connection refresh
+    this.receivers = new Map(); // socket -> { timer } Clients receiving data (OpenCPN, etc.)
+    this.lastData = null; // Last received data (for new connections)
     this.lastDataTime = null;
     this.messageCount = 0;
     this.bytesReceived = 0;
     this.bytesSent = 0;
-    this.refreshCount = 0;        // Count of connection refreshes
+    this.refreshCount = 0; // Count of connection refreshes
   }
 
   setSender(socket) {
     if (this.sender && this.sender !== socket) {
-      logger.warn({ port: this.port }, 'Replacing existing sender');
+      logger.warn({ port: this.port }, "Replacing existing sender");
       this.clearSenderTimer();
       try {
         this.sender.destroy();
       } catch (e) {}
     }
     this.sender = socket;
-    logger.info({ port: this.port, remoteAddress: socket.remoteAddress, remotePort: socket.remotePort }, 'AIS Sender connected');
-    
+    logger.info(
+      {
+        port: this.port,
+        remoteAddress: socket.remoteAddress,
+        remotePort: socket.remotePort,
+      },
+      "AIS Sender connected",
+    );
+
     // Setup connection refresh timer for sender
     this.setupSenderRefreshTimer(socket);
   }
 
   setupSenderRefreshTimer(socket) {
     if (CONNECTION_REFRESH_INTERVAL <= 0) return;
-    
+
     this.clearSenderTimer();
     const intervalMs = CONNECTION_REFRESH_INTERVAL * 60 * 1000;
-    
+
     this.senderTimer = setTimeout(() => {
       if (this.sender === socket && !socket.destroyed) {
         this.refreshCount++;
-        logger.info({ port: this.port, remoteAddress: socket.remoteAddress, intervalMinutes: CONNECTION_REFRESH_INTERVAL, refreshCount: this.refreshCount }, 'Sender connection refresh - disconnecting');
+        logger.info(
+          {
+            port: this.port,
+            remoteAddress: socket.remoteAddress,
+            intervalMinutes: CONNECTION_REFRESH_INTERVAL,
+            refreshCount: this.refreshCount,
+          },
+          "Sender connection refresh - disconnecting",
+        );
         socket.destroy();
       }
     }, intervalMs);
@@ -108,15 +140,31 @@ class PortChannel {
       timer = setTimeout(() => {
         if (this.receivers.has(socket) && !socket.destroyed) {
           this.refreshCount++;
-          logger.info({ port: this.port, remoteAddress: socket.remoteAddress, intervalMinutes: CONNECTION_REFRESH_INTERVAL, refreshCount: this.refreshCount }, 'Receiver connection refresh - disconnecting');
+          logger.info(
+            {
+              port: this.port,
+              remoteAddress: socket.remoteAddress,
+              intervalMinutes: CONNECTION_REFRESH_INTERVAL,
+              refreshCount: this.refreshCount,
+            },
+            "Receiver connection refresh - disconnecting",
+          );
           socket.destroy();
         }
       }, intervalMs);
     }
-    
+
     this.receivers.set(socket, { timer });
-    logger.info({ port: this.port, remoteAddress: socket.remoteAddress, remotePort: socket.remotePort, totalReceivers: this.receivers.size }, 'Receiver connected');
-    
+    logger.info(
+      {
+        port: this.port,
+        remoteAddress: socket.remoteAddress,
+        remotePort: socket.remotePort,
+        totalReceivers: this.receivers.size,
+      },
+      "Receiver connected",
+    );
+
     // Send last data to new receiver if available
     if (this.lastData) {
       try {
@@ -132,13 +180,16 @@ class PortChannel {
       clearTimeout(receiverData.timer);
     }
     this.receivers.delete(socket);
-    logger.info({ port: this.port, remainingReceivers: this.receivers.size }, 'Receiver disconnected');
+    logger.info(
+      { port: this.port, remainingReceivers: this.receivers.size },
+      "Receiver disconnected",
+    );
   }
 
   removeSender() {
     this.clearSenderTimer();
     this.sender = null;
-    logger.info({ port: this.port }, 'AIS Sender disconnected');
+    logger.info({ port: this.port }, "AIS Sender disconnected");
   }
 
   // Forward data from sender to all receivers
@@ -150,7 +201,10 @@ class PortChannel {
 
     if (VERBOSE_LOGGING) {
       const preview = data.toString().trim().substring(0, 80);
-      logger.debug({ port: this.port, preview, receivers: this.receivers.size }, 'Data forwarded');
+      logger.debug(
+        { port: this.port, preview, receivers: this.receivers.size },
+        "Data forwarded",
+      );
     }
 
     // Forward to all receivers immediately
@@ -165,15 +219,20 @@ class PortChannel {
           deadReceivers.push(receiver);
         }
       } catch (e) {
-        logger.error({ port: this.port, error: e.message }, 'Error sending to receiver');
+        logger.error(
+          { port: this.port, error: e.message },
+          "Error sending to receiver",
+        );
         deadReceivers.push(receiver);
       }
     }
-    
+
     // Clean up dead receivers
     for (const dead of deadReceivers) {
       this.removeReceiver(dead);
-      try { dead.destroy(); } catch (e) {}
+      try {
+        dead.destroy();
+      } catch (e) {}
     }
   }
 
@@ -186,7 +245,7 @@ class PortChannel {
       bytesReceived: this.bytesReceived,
       bytesSent: this.bytesSent,
       lastDataTime: this.lastDataTime,
-      refreshCount: this.refreshCount
+      refreshCount: this.refreshCount,
     };
   }
 }
@@ -196,9 +255,9 @@ class PortChannel {
 // ============================================
 class AISReceiverServer {
   constructor() {
-    this.channels = new Map();  // port -> PortChannel
-    this.servers = new Map();   // port -> TCP Server
-    this.healthServer = null;   // HTTP server for health check
+    this.channels = new Map(); // port -> PortChannel
+    this.servers = new Map(); // port -> TCP Server
+    this.healthServer = null; // HTTP server for health check
     this.startTime = Date.now();
     this.isHealthy = true;
   }
@@ -214,9 +273,9 @@ class AISReceiverServer {
   handleConnection(socket, port) {
     const channel = this.getOrCreateChannel(port);
     const clientInfo = `${socket.remoteAddress}:${socket.remotePort}`;
-    
+
     // Buffer for incomplete data
-    let dataBuffer = '';
+    let dataBuffer = "";
     let isSender = false;
     let isIdentified = false;
 
@@ -226,38 +285,55 @@ class AISReceiverServer {
     socket.setTimeout(300000); // 5 minutes timeout
 
     // Determine if this is a sender or receiver based on first data
-    socket.on('data', (data) => {
+    socket.on("data", (data) => {
       const strData = data.toString();
-      
+
       // First data determines role
       if (!isIdentified) {
         isIdentified = true;
-        
+
         // If data starts with AIS message pattern, it's a sender
-        if (strData.includes('!AIVDM') || strData.includes('!AIVDO') || 
-            strData.includes('$GPGGA') || strData.includes('$GPRMC') ||
-            strData.startsWith('\\')) {
+        if (isAISData(strData)) {
           isSender = true;
           channel.setSender(socket);
         } else {
           // Otherwise, treat as receiver (or could be receiver query)
           isSender = false;
           channel.addReceiver(socket);
-          
+
           // If there's existing data, receiver might be sending a query
           // Just ignore it, they're here to receive
           return;
         }
       }
 
+      // If already a receiver but starts sending AIS data, reclassify as sender
+      if (isIdentified && !isSender) {
+        if (isAISData(strData)) {
+          isSender = true;
+          channel.removeReceiver(socket);
+          channel.setSender(socket);
+          logger.info(
+            {
+              port,
+              remoteAddress: socket.remoteAddress,
+              remotePort: socket.remotePort,
+            },
+            "Receiver reclassified as AIS sender",
+          );
+          channel.forwardData(data);
+        }
+        // Non-AIS data from a receiver is ignored (they're just listeners)
+        return;
+      }
+
       if (isSender) {
         // Forward data to all receivers
         channel.forwardData(data);
       }
-      // If receiver sends data, ignore it (they're just listeners)
     });
 
-    socket.on('close', () => {
+    socket.on("close", () => {
       if (isSender) {
         channel.removeSender();
       } else if (isIdentified) {
@@ -265,28 +341,28 @@ class AISReceiverServer {
       }
     });
 
-    socket.on('error', (err) => {
+    socket.on("error", (err) => {
       if (VERBOSE_LOGGING) {
-        logger.warn({ port, clientInfo, error: err.message }, 'Socket error');
+        logger.warn({ port, clientInfo, error: err.message }, "Socket error");
       }
     });
 
-    socket.on('timeout', () => {
-      logger.info({ port, clientInfo }, 'Socket timeout');
+    socket.on("timeout", () => {
+      logger.info({ port, clientInfo }, "Socket timeout");
       socket.destroy();
     });
 
     // Initially, add as receiver (most common case)
     // Role will be determined on first data
     if (!isIdentified) {
-      // Wait a short moment to see if they send data (reduced from 1000ms to 100ms)
+      // Wait up to 1 second for first data to determine role
       setTimeout(() => {
         if (!isIdentified && !socket.destroyed) {
           isIdentified = true;
           isSender = false;
           channel.addReceiver(socket);
         }
-      }, 100);
+      }, 1000);
     }
   }
 
@@ -297,12 +373,12 @@ class AISReceiverServer {
         this.handleConnection(socket, port);
       });
 
-      server.on('error', (err) => {
-        if (err.code === 'EADDRINUSE') {
-          logger.warn({ port }, 'Port already in use, skipping');
+      server.on("error", (err) => {
+        if (err.code === "EADDRINUSE") {
+          logger.warn({ port }, "Port already in use, skipping");
           resolve(false);
         } else {
-          logger.error({ port, error: err.message }, 'Server error');
+          logger.error({ port, error: err.message }, "Server error");
           reject(err);
         }
       });
@@ -319,39 +395,55 @@ class AISReceiverServer {
     return new Promise((resolve, reject) => {
       this.healthServer = http.createServer((req, res) => {
         const stats = this.getHealthStats();
-        
-        if (req.url === '/health' || req.url === '/healthz') {
+
+        if (req.url === "/health" || req.url === "/healthz") {
           if (this.isHealthy) {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ status: 'healthy', ...stats }));
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ status: "healthy", ...stats }));
           } else {
-            res.writeHead(503, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ status: 'unhealthy', ...stats }));
+            res.writeHead(503, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ status: "unhealthy", ...stats }));
           }
-        } else if (req.url === '/ready') {
+        } else if (req.url === "/ready") {
           if (this.servers.size > 0) {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ status: 'ready', activePorts: this.servers.size }));
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                status: "ready",
+                activePorts: this.servers.size,
+              }),
+            );
           } else {
-            res.writeHead(503, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ status: 'not_ready' }));
+            res.writeHead(503, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ status: "not_ready" }));
           }
-        } else if (req.url === '/metrics' || req.url === '/stats') {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
+        } else if (req.url === "/metrics" || req.url === "/stats") {
+          res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(stats, null, 2));
         } else {
-          res.writeHead(404, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Not found', endpoints: ['/health', '/ready', '/metrics'] }));
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: "Not found",
+              endpoints: ["/health", "/ready", "/metrics"],
+            }),
+          );
         }
       });
 
-      this.healthServer.on('error', (err) => {
-        logger.error({ port: HEALTH_PORT, error: err.message }, 'Health server error');
+      this.healthServer.on("error", (err) => {
+        logger.error(
+          { port: HEALTH_PORT, error: err.message },
+          "Health server error",
+        );
         reject(err);
       });
 
       this.healthServer.listen(HEALTH_PORT, HOST, () => {
-        logger.info({ port: HEALTH_PORT, host: HOST }, 'Health check server started');
+        logger.info(
+          { port: HEALTH_PORT, host: HOST },
+          "Health check server started",
+        );
         resolve(true);
       });
     });
@@ -359,9 +451,10 @@ class AISReceiverServer {
 
   getHealthStats() {
     const uptime = Math.floor((Date.now() - this.startTime) / 1000);
-    const activeChannels = Array.from(this.channels.values())
-      .filter(ch => ch.sender || ch.receivers.size > 0);
-    
+    const activeChannels = Array.from(this.channels.values()).filter(
+      (ch) => ch.sender || ch.receivers.size > 0,
+    );
+
     let totalMessages = 0;
     let totalBytesReceived = 0;
     let totalBytesSent = 0;
@@ -387,46 +480,76 @@ class AISReceiverServer {
       totalBytesReceived,
       totalBytesSent,
       portRange: { start: PORT_START, end: PORT_END },
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     };
   }
 
   // Start all port servers in range
   async start() {
-    logger.info({ host: HOST, portStart: PORT_START, portEnd: PORT_END, totalPorts: PORT_END - PORT_START + 1, healthPort: HEALTH_PORT }, 'AIS Multi-Port Receiver & Forwarder Server starting');
-    
+    logger.info(
+      {
+        host: HOST,
+        portStart: PORT_START,
+        portEnd: PORT_END,
+        totalPorts: PORT_END - PORT_START + 1,
+        healthPort: HEALTH_PORT,
+      },
+      "AIS Multi-Port Receiver & Forwarder Server starting",
+    );
+
     // Start health check server first
     await this.startHealthServer();
-    
-    logger.info('Starting port servers...');
+
+    logger.info("Starting port servers...");
 
     let successCount = 0;
     let failCount = 0;
 
     // Start servers in batches to avoid overwhelming the system
     const batchSize = 100;
-    for (let startPort = PORT_START; startPort <= PORT_END; startPort += batchSize) {
+    for (
+      let startPort = PORT_START;
+      startPort <= PORT_END;
+      startPort += batchSize
+    ) {
       const endPort = Math.min(startPort + batchSize - 1, PORT_END);
       const promises = [];
-      
+
       for (let port = startPort; port <= endPort; port++) {
         promises.push(
           this.startPortServer(port)
-            .then(success => success ? successCount++ : failCount++)
-            .catch(() => failCount++)
+            .then((success) => (success ? successCount++ : failCount++))
+            .catch(() => failCount++),
         );
       }
-      
+
       await Promise.all(promises);
-      
+
       // Progress update
-      const progress = Math.round(((endPort - PORT_START + 1) / (PORT_END - PORT_START + 1)) * 100);
-      logger.debug({ progress, successCount, failCount }, 'Port startup progress');
+      const progress = Math.round(
+        ((endPort - PORT_START + 1) / (PORT_END - PORT_START + 1)) * 100,
+      );
+      logger.debug(
+        { progress, successCount, failCount },
+        "Port startup progress",
+      );
     }
 
-    logger.info({ activePorts: successCount, failedPorts: failCount }, 'Server started successfully');
-    logger.info({ healthEndpoints: [`http://${HOST}:${HEALTH_PORT}/health`, `http://${HOST}:${HEALTH_PORT}/ready`, `http://${HOST}:${HEALTH_PORT}/metrics`] }, 'Health check endpoints available');
-    logger.info('Waiting for connections...');
+    logger.info(
+      { activePorts: successCount, failedPorts: failCount },
+      "Server started successfully",
+    );
+    logger.info(
+      {
+        healthEndpoints: [
+          `http://${HOST}:${HEALTH_PORT}/health`,
+          `http://${HOST}:${HEALTH_PORT}/ready`,
+          `http://${HOST}:${HEALTH_PORT}/metrics`,
+        ],
+      },
+      "Health check endpoints available",
+    );
+    logger.info("Waiting for connections...");
 
     // Start stats interval
     setInterval(() => this.showStats(), STATS_INTERVAL * 1000);
@@ -434,56 +557,66 @@ class AISReceiverServer {
 
   showStats() {
     const stats = this.getHealthStats();
-    const activeChannels = Array.from(this.channels.values())
-      .filter(ch => ch.sender || ch.receivers.size > 0);
+    const activeChannels = Array.from(this.channels.values()).filter(
+      (ch) => ch.sender || ch.receivers.size > 0,
+    );
 
     if (activeChannels.length === 0) return;
 
-    const channelDetails = activeChannels.map(ch => {
+    const channelDetails = activeChannels.map((ch) => {
       const chStats = ch.getStats();
       return {
         port: chStats.port,
         hasSender: chStats.hasSender,
         receivers: chStats.receiverCount,
         messages: chStats.messageCount,
-        lastData: chStats.lastDataTime ? new Date(chStats.lastDataTime).toISOString() : null
+        lastData: chStats.lastDataTime
+          ? new Date(chStats.lastDataTime).toISOString()
+          : null,
       };
     });
 
-    logger.info({ 
-      uptime: stats.uptimeHuman, 
-      activeChannels: stats.activeChannels,
-      totalSenders: stats.totalSenders,
-      totalReceivers: stats.totalReceivers,
-      totalMessages: stats.totalMessages,
-      channels: channelDetails
-    }, 'Statistics');
+    logger.info(
+      {
+        uptime: stats.uptimeHuman,
+        activeChannels: stats.activeChannels,
+        totalSenders: stats.totalSenders,
+        totalReceivers: stats.totalReceivers,
+        totalMessages: stats.totalMessages,
+        channels: channelDetails,
+      },
+      "Statistics",
+    );
   }
 
   // Graceful shutdown
   shutdown() {
-    logger.info('Shutting down...');
+    logger.info("Shutting down...");
     this.isHealthy = false;
-    
+
     for (const [port, server] of this.servers) {
       server.close();
     }
-    
+
     for (const channel of this.channels.values()) {
       if (channel.sender) {
-        try { channel.sender.destroy(); } catch (e) {}
+        try {
+          channel.sender.destroy();
+        } catch (e) {}
       }
       for (const receiver of channel.receivers) {
-        try { receiver.destroy(); } catch (e) {}
+        try {
+          receiver.destroy();
+        } catch (e) {}
       }
     }
-    
+
     if (this.healthServer) {
       this.healthServer.close();
     }
-    
+
     this.showStats();
-    logger.info('Goodbye!');
+    logger.info("Goodbye!");
     process.exit(0);
   }
 }
@@ -493,10 +626,10 @@ class AISReceiverServer {
 // ============================================
 const server = new AISReceiverServer();
 
-process.on('SIGINT', () => server.shutdown());
-process.on('SIGTERM', () => server.shutdown());
+process.on("SIGINT", () => server.shutdown());
+process.on("SIGTERM", () => server.shutdown());
 
-server.start().catch(err => {
-  logger.error({ error: err.message }, 'Failed to start server');
+server.start().catch((err) => {
+  logger.error({ error: err.message }, "Failed to start server");
   process.exit(1);
 });
